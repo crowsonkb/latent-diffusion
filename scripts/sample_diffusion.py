@@ -228,7 +228,8 @@ def load_model_from_config(config, sd):
 def load_model(config, ckpt, gpu, eval_mode):
     if ckpt:
         print(f"Loading model from {ckpt}")
-        pl_sd = torch.load(ckpt, map_location="cpu")
+        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        pl_sd = torch.load(ckpt, map_location=device)
         global_step = pl_sd["global_step"]
     else:
         pl_sd = {"state_dict": None}

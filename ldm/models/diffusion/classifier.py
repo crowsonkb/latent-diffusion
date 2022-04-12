@@ -68,7 +68,8 @@ class NoisyLatentImageClassifier(pl.LightningModule):
         self.weight_decay = weight_decay
 
     def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
-        sd = torch.load(path, map_location="cpu")
+        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        sd = torch.load(path, map_location=device)
         if "state_dict" in list(sd.keys()):
             sd = sd["state_dict"]
         keys = list(sd.keys())
