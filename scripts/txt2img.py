@@ -3,18 +3,22 @@ import torch
 import numpy as np
 from omegaconf import OmegaConf
 from PIL import Image
-from tqdm import tqdm, trange
+from tqdm.auto import tqdm, trange
 from einops import rearrange
 from torchvision.utils import make_grid
+import gc
+
+import sys
+sys.path.append('.')
 
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
 
 
-def load_model_from_config(config, ckpt, verbose=False):
+def load_model_from_config(config, ckpt, device_name='cpu', verbose=False):
     print(f"Loading model from {ckpt}")
-    pl_sd = torch.load(ckpt, map_location="cpu")
+    pl_sd = torch.load(ckpt, map_location='cuda:0' if device_name == 'cuda' else 'cpu')
     sd = pl_sd["state_dict"]
     model = instantiate_from_config(config.model)
     m, u = model.load_state_dict(sd, strict=False)
@@ -25,7 +29,8 @@ def load_model_from_config(config, ckpt, verbose=False):
         print("unexpected keys:")
         print(u)
 
-    model.cuda()
+    if device_name == 'cuda':
+        model.half().cuda()
     model.eval()
     return model
 
@@ -103,14 +108,20 @@ if __name__ == "__main__":
     )
     opt = parser.parse_args()
 
+    device_name = 'cpu'
+    if torch.cuda.is_available():
+        device_name = 'cuda'
+        torch.cuda.empty_cache()
+    gc.collect()
 
     config = OmegaConf.load("configs/latent-diffusion/txt2img-1p4B-eval.yaml")  # TODO: Optionally download from same location as ckpt and chnage this logic
-    model = load_model_from_config(config, "models/ldm/text2img-large/model.ckpt")  # TODO: check path
+    model = load_model_from_config(config, "models/ldm/text2img-large/model.ckpt", device_name=device_name)  # TODO: check path
 
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    device = torch.device(device_name)
     model = model.to(device)
 
     if opt.plms:
+        opt.ddim_eta = 0
         sampler = PLMSSampler(model)
     else:
         sampler = DDIMSampler(model)
@@ -124,35 +135,35 @@ if __name__ == "__main__":
     sample_path = os.path.join(outpath, "samples")
     os.makedirs(sample_path, exist_ok=True)
     base_count = len(os.listdir(sample_path))
-
+            
     all_samples=list()
     with torch.no_grad():
-        with model.ema_scope():
-            uc = None
-            if opt.scale != 1.0:
-                uc = model.get_learned_conditioning(opt.n_samples * [""])
-            for n in trange(opt.n_iter, desc="Sampling"):
-                c = model.get_learned_conditioning(opt.n_samples * [prompt])
-                shape = [4, opt.H//8, opt.W//8]
-                samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
-                                                 conditioning=c,
-                                                 batch_size=opt.n_samples,
-                                                 shape=shape,
-                                                 verbose=False,
-                                                 unconditional_guidance_scale=opt.scale,
-                                                 unconditional_conditioning=uc,
-                                                 eta=opt.ddim_eta)
+        with torch.autocast(device_name):
+            with model.ema_scope():
+                uc = None
+                if opt.scale != 1.0:
+                    uc = model.get_learned_conditioning(opt.n_samples * [""])
+                for n in trange(opt.n_iter, desc="Sampling"):
+                    c = model.get_learned_conditioning(opt.n_samples * [prompt])
+                    shape = [4, opt.H//8, opt.W//8]
+                    samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
+                                                     conditioning=c,
+                                                     batch_size=opt.n_samples,
+                                                     shape=shape,
+                                                     verbose=False,
+                                                     unconditional_guidance_scale=opt.scale,
+                                                     unconditional_conditioning=uc,
+                                                     eta=opt.ddim_eta)
 
-                x_samples_ddim = model.decode_first_stage(samples_ddim)
-                x_samples_ddim = torch.clamp((x_samples_ddim+1.0)/2.0, min=0.0, max=1.0)
+                    x_samples_ddim = model.decode_first_stage(samples_ddim)
+                    x_samples_ddim = torch.clamp((x_samples_ddim+1.0)/2.0, min=0.0, max=1.0)
 
-                for x_sample in x_samples_ddim:
-                    x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-                    Image.fromarray(x_sample.astype(np.uint8)).save(os.path.join(sample_path, f"{base_count:04}.png"))
-                    base_count += 1
-                all_samples.append(x_samples_ddim)
-
-
+                    for x_sample in x_samples_ddim:
+                        x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+                        Image.fromarray(x_sample.astype(np.uint8)).save(os.path.join(sample_path, f"{base_count:04}.png"))
+                        base_count += 1
+                    all_samples.append(x_samples_ddim)
+        
     # additionally, save as grid
     grid = torch.stack(all_samples, 0)
     grid = rearrange(grid, 'n b c h w -> (n b) c h w')
