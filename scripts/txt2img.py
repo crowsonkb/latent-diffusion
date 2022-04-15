@@ -1,5 +1,8 @@
 import argparse, os, sys, glob
+import mysql.connector as DB
+import configparser
 import torch
+import torch.nn as nn
 import numpy as np
 from omegaconf import OmegaConf
 from PIL import Image
@@ -11,6 +14,8 @@ from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
 
+conf = configparser.ConfigParser()
+conf.read('../db.ini')
 
 def load_model_from_config(config, ckpt, verbose=False):
     print(f"Loading model from {ckpt}")
@@ -28,6 +33,24 @@ def load_model_from_config(config, ckpt, verbose=False):
     model.cuda()
     model.eval()
     return model
+
+def db_insert_run(data):
+    cnx = DB.connect(
+            user=conf['DB']['user'],
+            password=conf['DB']['password'],
+            host=conf['DB']['host'],
+            database=conf['DB']['database'])
+    cursor = cnx.cursor()
+    query = ("INSERT INTO LDM (prompt, outdir, ddim_steps, plms, ddim_eta, n_iter, height, "
+        "width, n_samples, scale, started_at) VALUES ( %(prompt)s, %(outdir)s, %(ddim_steps)s,"
+        "%(plms)s, %(ddim_eta)s, %(n_iter)s, %(height)s, %(width)s, %(n_samples)s, "
+        "%(scale)s, NOW())")
+    cursor.execute(query, data)
+    cnx.commit()
+    lastrow = cursor.lastrowid
+    cursor.close()
+    cnx.close()
+    #return lastrow
 
 
 if __name__ == "__main__":
@@ -101,6 +124,7 @@ if __name__ == "__main__":
         default=5.0,
         help="unconditional guidance scale: eps = eps(x, empty) + scale * (eps(x, cond) - eps(x, empty))",
     )
+
     opt = parser.parse_args()
 
 
@@ -108,6 +132,9 @@ if __name__ == "__main__":
     model = load_model_from_config(config, "models/ldm/text2img-large/model.ckpt")  # TODO: check path
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    if torch.cuda.device_count() > 1:
+        print("I found", torch.cuda.device_count(), "GPUs!!! Let's do it!")
+        model = nn.DataParallel(model)
     model = model.to(device)
 
     if opt.plms:
@@ -121,9 +148,24 @@ if __name__ == "__main__":
     prompt = opt.prompt
 
 
-    sample_path = os.path.join(outpath, "samples")
-    os.makedirs(sample_path, exist_ok=True)
-    base_count = len(os.listdir(sample_path))
+    # sample_path = os.path.join(outpath, "samples")
+    # os.makedirs(sample_path, exist_ok=True)
+    # base_count = len(os.listdir(sample_path))
+    base_count = 0
+
+    run_info = {
+            'prompt' : opt.prompt,
+            'outdir' : opt.outdir,
+            'ddim_steps' : opt.ddim_steps,
+            'plms' : opt.plms,
+            'ddim_eta' : opt.ddim_eta,
+            'n_iter' : opt.n_iter,
+            'height' : opt.H,
+            'width' : opt.W,
+            'n_samples' : opt.n_samples,
+            'scale' : opt.scale
+        }
+    db_insert_run(run_info)
 
     all_samples=list()
     with torch.no_grad():
@@ -148,7 +190,7 @@ if __name__ == "__main__":
 
                 for x_sample in x_samples_ddim:
                     x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-                    Image.fromarray(x_sample.astype(np.uint8)).save(os.path.join(sample_path, f"{base_count:04}.png"))
+                    Image.fromarray(x_sample.astype(np.uint8)).save(os.path.join(outpath, f"output-{base_count:04}.png"))
                     base_count += 1
                 all_samples.append(x_samples_ddim)
 
@@ -160,6 +202,6 @@ if __name__ == "__main__":
 
     # to image
     grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
-    Image.fromarray(grid.astype(np.uint8)).save(os.path.join(outpath, f'{prompt.replace(" ", "-")}.png'))
+    Image.fromarray(grid.astype(np.uint8)).save(os.path.join(outpath, f'collage.png'))
 
-    print(f"Your samples are ready and waiting four you here: \n{outpath} \nEnjoy.")
+    print(f"Your samples are ready and waiting for you here: \n{outpath} \nEnjoy.")
