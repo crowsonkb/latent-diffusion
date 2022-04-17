@@ -129,7 +129,7 @@ if __name__ == "__main__":
     prompt = opt.prompt
 
     if not opt.seed:
-        opt.seed=(torch.initial_seed() % 2**32)
+        opt.seed=(np.random.randint(65536, size=1))
     seed_everything(opt.seed)
     
     sample_path = os.path.join(outpath, "samples")
